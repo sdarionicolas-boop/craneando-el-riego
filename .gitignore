@@ -1,0 +1,27 @@
+# .gitignore
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Streamlit
+.streamlit/
+*.pyg
+
+# Documentos locales y temporales (no necesarios para la app en Streamlit Cloud)
+*.pdf
+*.docx
+*.txt
+*.jpeg
+*.jpg
+*.png
+*.jp2
+extracted_pdf_images/
+
+# Variables de entorno
+.env
+.venv
+env/
+venv/
+ENV/
