@@ -17,7 +17,7 @@ SUELO_CONFIG = {
         ],
         "factor_ajuste": 0.75,     # Factor de corrección radicular/efectivo
         "techo_sistema": 120.0,    # Capacidad máxima del sistema (mm)
-        "infiltracion_max": 25.0,  # Capacidad de infiltración límite por aplicación (mm)
+        "infiltracion_max": 15.0,  # Capacidad de infiltración límite por aplicación (mm) - Estimado por bibliografía para Vertisol (rango 2-15 mm/h)
         "caudal_pivote": 1.4,      # Caudal de diseño del pivote (mm/hora)
         "eficiencia_riego": 0.90,  # Eficiencia del sistema de pivote
     }

@@ -104,7 +104,8 @@ crop_model = CropModel(siembra_date)
 st.sidebar.markdown("---")
 st.sidebar.subheader("🎯 Criterio de Riego")
 cc_target_pct = st.sidebar.slider("% CC Objetivo a cubrir", 70, 100, 100, help="Estrategia ofensiva (100%) vs conservadora (deja margen para lluvias)")
-infiltracion_limit = st.sidebar.number_input("Infiltración máx. suelo (mm/riego)", 10.0, 50.0, soil_profile.infiltracion_max, step=5.0)
+infiltracion_limit = st.sidebar.number_input("Infiltración máx. suelo (mm/riego)", 5.0, 50.0, soil_profile.infiltracion_max, step=5.0)
+st.sidebar.caption("⚠️ *Infiltración de 15.0 mm: Valor estimado por bibliografía para suelos Vertisoles arcillosos de San Martín (sin medición en campo).*")
 caudal_pivote = st.sidebar.number_input("Caudal Pivote (mm/hora)", 0.5, 5.0, soil_profile.caudal_pivote, step=0.1)
 
 # Simulación de la fecha actual
@@ -477,13 +478,65 @@ fig.update_yaxes(range=[0, techo + 10], secondary_y=False)
 
 st.plotly_chart(fig, use_container_width=True)
 
+
+# --- CLIMA EN TIEMPO REAL (DGHyOS) ---
+st.markdown("### 🌦️ Ingesta de Clima en Tiempo Real (Red de Estaciones DGHyOS)")
+st.markdown(
+    "Esta sección muestra las mediciones reales de precipitación y evapotranspiración (ETo) obtenidas "
+    "en tiempo real desde la red de estaciones meteorológicas del Gobierno de Entre Ríos (DGHyOS), "
+    "utilizadas para alimentar el motor en producción."
+)
+
+with st.spinner("Conectando con la red oficial de estaciones de Entre Ríos..."):
+    from data.weather import get_realtime_weather_last_7_days
+    realtime_data, active_weather_source = get_realtime_weather_last_7_days()
+
+# Mostrar el origen de la fuente climática con un banner informativo
+st.success(f"📡 **Fuente climática activa**: {active_weather_source}")
+
+# Crear columnas para el clima real
+col_rt_stats, col_rt_table = st.columns([2, 2])
+
+with col_rt_stats:
+    total_rt_rain = sum(d["lluvia"] for d in realtime_data)
+    total_rt_et = sum(d["etp"] for d in realtime_data)
+    
+    st.markdown(
+        f'<div class="metric-card" style="background-color: #ffffff; border-left: 5px solid #2980b9;">'
+        f'<small>Lluvia Real Acumulada (Últimos 7d)</small>'
+        f'<h3 style="color: #2980b9 !important; font-weight: bold !important;">{total_rt_rain:.1f} mm</h3>'
+        f'<p style="color: #555555 !important;">Registrado en estación meteorológica</p>'
+        f'</div>',
+        unsafe_allow_html=True
+    )
+    
+    st.markdown(
+        f'<div class="metric-card" style="background-color: #ffffff; border-left: 5px solid #d35400;">'
+        f'<small>ETo Real Acumulada (Últimos 7d)</small>'
+        f'<h3 style="color: #d35400 !important; font-weight: bold !important;">{total_rt_et:.1f} mm</h3>'
+        f'<p style="color: #555555 !important;">Evapotranspiración de referencia</p>'
+        f'</div>',
+        unsafe_allow_html=True
+    )
+
+with col_rt_table:
+    # Convertir a DataFrame para visualización
+    df_rt = pd.DataFrame(realtime_data)
+    df_rt["Fecha"] = df_rt["fecha"].apply(lambda d: d.strftime('%d/%m/%Y'))
+    df_rt = df_rt.rename(columns={"lluvia": "Lluvia (mm)", "etp": "ETo (mm)"})
+    st.dataframe(df_rt[["Fecha", "Lluvia (mm)", "ETo (mm)"]], hide_index=True, use_container_width=True)
+
+st.markdown("---")
+
+
 # --- SECCIÓN DE CALIBRACIÓN: MODELO VS SENSOR ---
 st.markdown("### 🔍 Calibración: Modelo de Balance vs Sensor Real")
 st.markdown(
     "Este gráfico contrasta el nivel de **Agua Útil calculado** por el motor de balance hídrico "
-    "contra el **Agua Útil medida empíricamente** por el sensor de humedad de suelo (AGSENSE). "
+    "contra el **Agua Útil medida empíricamente** por el sensor de humedad de suelo (Nuevas Sondas de Prueba). "
     "Las lecturas volumétricas (% VWC) de los 3 horizontes se convirtieron a milímetros equivalentes de AU "
-    "para permitir una comparación directa y validar la calibración del modelo."
+    "para permitir una comparación directa y validar la calibración del modelo. "
+    "*Nota: Se descartó el uso de AGSENSE/Valley ya que el proveedor solo brinda monitoreo operativo mecánico del pivote, no lecturas de humedad.*"
 )
 
 fig_calib = go.Figure()
@@ -533,8 +586,9 @@ st.plotly_chart(fig_calib, use_container_width=True)
 
 st.info(
     "💡 **Nota de Ingesta del Sensor**: Los datos de humedad de suelo son simulados en esta fase (mock/stub) "
-    "con el fin de ilustrar la interfaz de validación. La conexión final requiere configurar la API "
-    "de AGSENSE/Valley."
+    "con el fin de ilustrar la interfaz de validación. La integración de AGSENSE/Valley se descartó dado que "
+    "el proveedor solo brinda monitoreo operativo del pivote (motores, presión, caudal) y no lecturas de humedad. "
+    "La conexión final requiere configurar las nuevas sondas en prueba de esta campaña."
 )
 
 
