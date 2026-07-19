@@ -9,25 +9,26 @@ def calculate_lluvia_efectiva(lluvia: float, coef_override: float = None) -> flo
     """
     Calcula la lluvia efectiva en mm basándose en rangos predefinidos o un coeficiente override.
     
-    Lógica de rangos:
-    - PP < 15 mm -> Coef = 1.00
+    Lógica de rangos (según planilla de referencia):
+    - PP < 15 mm  -> Coef = 1.00
     - PP 15-30 mm -> Coef = 0.85
     - PP 30-60 mm -> Coef = 0.70
-    - PP > 60 mm -> Coef = 0.55
+    - PP > 60 mm  -> Coef = 0.55
     """
     if lluvia is None or lluvia <= 0:
         return 0.0
-    
+
     if coef_override is not None:
         return round(lluvia * coef_override, 4)
-        
-    # Lógica por rangos (de config.py)
-    coef = 1.00
-    for limite, c in LLUVIA_EFECTIVA_RANGOS:
-        if lluvia <= limite:
+
+    # Lógica por rangos (de config.py): el primer límite es exclusivo (PP < 15 -> 1.00),
+    # los siguientes son inclusivos (15 <= PP <= 30 -> 0.85, etc.)
+    coef = LLUVIA_EFECTIVA_RANGOS[-1][1]
+    for i, (limite, c) in enumerate(LLUVIA_EFECTIVA_RANGOS):
+        if (lluvia < limite) if i == 0 else (lluvia <= limite):
             coef = c
             break
-            
+
     return round(lluvia * coef, 4)
 
 

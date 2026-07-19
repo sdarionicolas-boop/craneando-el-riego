@@ -16,10 +16,16 @@ SUELO_CONFIG = {
             {"nombre": "H3", "espesor_dm": 6.0, "cc": 31.3, "pmp": 19.8, "da": 1.40}, # 40-80 cm
         ],
         "factor_ajuste": 0.75,     # Factor de corrección radicular/efectivo
-        "techo_sistema": 120.0,    # Capacidad máxima del sistema (mm)
+        # Techo del balance según la planilla de referencia (El Trébol capea AU en 120 mm).
+        # NOTA: es mayor que la AU corregida calculada de los horizontes (~109 mm); se mantiene
+        # por paridad con la planilla hasta tener los datos de laboratorio de San Martín.
+        "techo_sistema": 120.0,
         "infiltracion_max": 5.0,   # Capacidad de infiltración límite por aplicación (mm) - Estimado por bibliografía para Vertisol (rango 2-15 mm/h)
         "caudal_pivote": 1.4,      # Caudal de diseño del pivote (mm/hora)
-        "eficiencia_riego": 0.90,  # Eficiencia del sistema de pivote
+        # Eficiencia de aplicación del pivote: se usa para convertir la lámina neta requerida
+        # en lámina bruta a aplicar (bruta = neta / eficiencia). El balance histórico suma el
+        # riego registrado tal cual, igual que la planilla de referencia.
+        "eficiencia_riego": 0.90,
     }
 }
 

@@ -1,7 +1,8 @@
 # core/crop.py
 """
-Módulo para administrar el Kc (Coeficiente de Cultivo) e interpolación por DAS.
-También incluye la interfaz stub para el Kc basado en NDVI.
+Módulo para administrar el Kc (Coeficiente de Cultivo) mediante tabla escalonada por DAS.
+La tabla replica los tramos semanales de la planilla de referencia (sin interpolación,
+por paridad con la planilla). También incluye la interfaz stub para el Kc basado en NDVI.
 """
 
 from core.config import KC_DAS_TABLE, STAGE_DAS_TABLE, UMBRAL_VEGETATIVO

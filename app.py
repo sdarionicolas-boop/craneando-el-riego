@@ -3,7 +3,6 @@
 Dashboard de Recomendación de Riego de Precisión - MVP "Craneando el Riego"
 """
 
-import streamlit as pd_st # just import streamlit
 import streamlit as st
 import datetime
 import pandas as pd
@@ -15,7 +14,7 @@ from core.config import SUELO_CONFIG
 from core.soil import SoilProfile
 from core.crop import CropModel
 from core.balance import DailyWaterBalance
-from data.weather import WeatherHistory, get_7day_forecast
+from data.weather import WeatherHistory, get_7day_forecast, get_demo_forecast, get_production_history
 from data.sensor import get_humidity_data
 
 # Configuración de página de Streamlit
@@ -76,19 +75,19 @@ st.markdown("""
 st.title("🚜 Craneando el Riego — Precisión y Anticipación")
 st.subheader("Plataforma de recomendación de riego integrado para cultivos extensivos")
 
-# Cargar Datos Históricos de referencia
-weather_loader = WeatherHistory()
-try:
-    df_history = weather_loader.load_from_excel()
-except Exception as e:
-    st.error(f"Error al cargar el archivo Excel de referencia: {e}")
-    st.stop()
-
 # --- SIDEBAR: CONFIGURACIÓN Y SIMULACIÓN ---
 st.sidebar.header("⚙️ Configuración del Lote")
 
 # Selección de Lote (por ahora solo San Martín, con datos placeholder de El Trébol)
 lote_selected = st.sidebar.selectbox("Lote Piloto", ["San Martín"])
+
+# Fuente de datos que alimenta el motor de balance
+data_mode = st.sidebar.radio(
+    "Fuente de datos del motor",
+    ["Demo — El Trébol 2025-26 (Excel)", "Producción — Clima real (DGHyOS + Open-Meteo)"],
+    help="Demo: valida el motor contra la planilla histórica. Producción: alimenta el balance con clima real desde la fecha de siembra (riegos aplicados pendientes de ingesta)."
+)
+is_demo = data_mode.startswith("Demo")
 
 # Cargar configuración de suelo
 soil_profile = SoilProfile.from_config(lote_selected, SUELO_CONFIG)
@@ -107,21 +106,46 @@ cc_target_pct = st.sidebar.slider("% CC Objetivo a cubrir", 70, 100, 100, help="
 infiltracion_limit = st.sidebar.number_input("Infiltración máx. suelo (mm/riego)", 5.0, 50.0, soil_profile.infiltracion_max, step=5.0)
 st.sidebar.caption("⚠️ *Infiltración de 5.0 mm: Valor estimado por bibliografía para suelos Vertisoles arcillosos de San Martín (sin medición en campo).*")
 caudal_pivote = st.sidebar.number_input("Caudal Pivote (mm/hora)", 0.5, 5.0, soil_profile.caudal_pivote, step=0.1)
+eficiencia_riego = st.sidebar.number_input(
+    "Eficiencia de aplicación del pivote", 0.50, 1.00, soil_profile.eficiencia_riego, step=0.05,
+    help="Fracción de la lámina aplicada que llega efectivamente al suelo. La lámina bruta recomendada se calcula como neta / eficiencia."
+)
 
-# Simulación de la fecha actual
+# --- CARGA DE DATOS SEGÚN FUENTE ---
 st.sidebar.markdown("---")
-st.sidebar.subheader("📅 Modo Demo — Campaña El Trébol 2025-26")
-st.sidebar.warning(
-    "⚠️ **Nota de Lote**: Las constantes de suelo y clima corresponden a **El Trébol 2025-26** "
-    "para validar la lógica matemática del motor. Los datos reales de San Martín se aplicarán apenas "
-    "lleguen del laboratorio."
-)
-st.sidebar.markdown(
-    "Puedes desplazar la fecha de evaluación para probar la respuesta del sistema:"
-)
+if is_demo:
+    st.sidebar.subheader("📅 Modo Demo — Campaña El Trébol 2025-26")
+    st.sidebar.warning(
+        "⚠️ **Nota de Lote**: Las constantes de suelo y clima corresponden a **El Trébol 2025-26** "
+        "para validar la lógica matemática del motor. Los datos reales de San Martín se aplicarán apenas "
+        "lleguen del laboratorio."
+    )
+    weather_loader = WeatherHistory()
+    try:
+        df_history = weather_loader.load_from_excel()
+    except Exception as e:
+        st.error(f"Error al cargar el archivo Excel de referencia: {e}")
+        st.stop()
+    history_source = "Planilla El Trébol 2025-26 (Excel)"
+    st.sidebar.markdown(
+        "Puedes desplazar la fecha de evaluación para probar la respuesta del sistema:"
+    )
+else:
+    st.sidebar.subheader("🌐 Modo Producción — Clima Real")
+    st.sidebar.warning(
+        "⚠️ **Pendiente de ingesta**: los riegos efectivamente aplicados aún no se registran "
+        "automáticamente, por lo que el balance asume riego = 0 en todo el período."
+    )
+    with st.spinner("Descargando serie climática de la temporada (DGHyOS + Open-Meteo)..."):
+        df_history, history_source = get_production_history(siembra_date)
+    if df_history.empty:
+        st.error("No se pudo construir la serie climática de producción (sin conexión a las fuentes). Cambia a Modo Demo.")
+        st.stop()
+
 min_date = df_history["fecha"].min()
 max_date = df_history["fecha"].max()
-eval_date = st.sidebar.slider("Fecha de Evaluación", min_date, max_date, datetime.date(2025, 12, 25))
+default_eval = datetime.date(2025, 12, 25) if is_demo else max_date
+eval_date = st.sidebar.slider("Fecha de Evaluación", min_date, max_date, default_eval)
 
 # --- PROCESAMIENTO DEL BALANCE HÍDRICO ---
 # Filtrar histórico hasta la fecha de evaluación
@@ -184,8 +208,12 @@ df_sensor_raw["au_sensor_mm"] = au_sensor_mm_list
 df_past = df_past.merge(df_sensor_raw[["fecha", "au_sensor_mm"]], on="fecha", how="left")
 
 # --- CÁLCULO DE PROYECCIÓN A 7 DÍAS ---
-# Obtener el pronóstico climático para los próximos 7 días
-forecast_data = get_7day_forecast()
+# Demo: "pronóstico perfecto" tomado del propio histórico de la campaña (coherente con
+# las fechas simuladas). Producción: pronóstico real de Open-Meteo.
+if is_demo:
+    forecast_data = get_demo_forecast(df_history, eval_date)
+else:
+    forecast_data = get_7day_forecast()[:7]
 proj_records = []
 proj_au_riego = au_riego_prev
 proj_au_secano = au_secano_prev
@@ -227,10 +255,14 @@ df_total = pd.concat([df_past, df_proj], ignore_index=True)
 
 # --- RECOMENDACIÓN DE RIEGO ---
 st.markdown("### 💡 Recomendación de Riego Actual")
+st.caption(f"📡 Fuente de datos del balance: **{history_source}**")
 
 current_au = df_past["au_riego"].iloc[-1]
 current_stage = df_past["stage"].iloc[-1]
 current_umbral = df_past["umbral"].iloc[-1]
+# El techo de la planilla (120 mm) supera la AU corregida de horizontes (~109 mm),
+# por lo que el % se acota a 100 para no mostrar valores superiores a la capacidad.
+pct_au = min(100.0, current_au / au_corregida * 100.0)
 
 # Buscar si cruzará el umbral en la proyección de 7 días
 crosses_threshold = False
@@ -245,24 +277,39 @@ for idx, row in df_proj.iterrows():
         break
 
 # Calcular requerimiento de riego
-# Deficit para llevar al % CC objetivo
-au_target = au_corregida * (cc_target_pct / 100.0)
+# Deficit para llevar al % CC objetivo (sin superar el techo del sistema)
+au_target = min(au_corregida * (cc_target_pct / 100.0), techo)
 deficit = au_target - current_au
 
 if deficit > 0:
-    lamina_rec = min(deficit, infiltracion_limit)
-    tiempo_horas = lamina_rec / caudal_pivote
+    # Lámina neta: agua que debe entrar al suelo, limitada por la infiltración por pasada
+    lamina_neta = min(deficit, infiltracion_limit)
+    # Lámina bruta: lo que debe aplicar el pivote para que llegue la neta al suelo
+    lamina_bruta = lamina_neta / eficiencia_riego
+    tiempo_horas = lamina_bruta / caudal_pivote
+    n_aplicaciones = int(np.ceil(deficit / infiltracion_limit))
 else:
-    lamina_rec = 0.0
+    lamina_neta = 0.0
+    lamina_bruta = 0.0
     tiempo_horas = 0.0
+    n_aplicaciones = 0
+
+detalle_lamina = (
+    f"{lamina_bruta:.1f} mm brutos ({lamina_neta:.1f} mm netos al suelo, "
+    f"eficiencia {eficiencia_riego:.0%}; máx. {infiltracion_limit:.0f} mm/pasada por infiltración)"
+)
+detalle_pasadas = (
+    f"<br>- **Pasadas para cerrar el déficit total ({deficit:.1f} mm)**: {n_aplicaciones}"
+    if n_aplicaciones > 1 else ""
+)
 
 if current_au < current_umbral:
     st.markdown(
         f'<div class="recommendation-alert">'
         f'<strong>⚠️ ALERTA: EL CULTIVO ESTÁ BAJO ESTRÉS HÍDRICO HACE {current_umbral - current_au:.1f} mm.</strong><br>'
         f'Se recomienda iniciar riego **DE INMEDIATO**.<br>'
-        f'- **Lámina sugerida**: {lamina_rec:.1f} mm (limitada por capacidad de infiltración de {infiltracion_limit} mm)<br>'
-        f'- **Tiempo de operación estimado**: {tiempo_horas:.1f} horas de pivote'
+        f'- **Lámina sugerida**: {detalle_lamina}<br>'
+        f'- **Tiempo de operación estimado**: {tiempo_horas:.1f} horas de pivote{detalle_pasadas}'
         f'</div>',
         unsafe_allow_html=True
     )
@@ -272,8 +319,8 @@ elif crosses_threshold:
         f'<div class="recommendation-alert">'
         f'<strong>⏳ ANTICIPACIÓN: Se proyecta cruce del umbral en {dias_restantes} días ({cross_date.strftime("%d/%m")}).</strong><br>'
         f'Planificar riego preventivo para evitar estrés (AU proyectado caerá a {cross_au:.1f} mm).<br>'
-        f'- **Lámina preventiva recomendada**: {lamina_rec:.1f} mm<br>'
-        f'- **Tiempo de operación estimado**: {tiempo_horas:.1f} horas de pivote'
+        f'- **Lámina preventiva recomendada**: {detalle_lamina}<br>'
+        f'- **Tiempo de operación estimado**: {tiempo_horas:.1f} horas de pivote{detalle_pasadas}'
         f'</div>',
         unsafe_allow_html=True
     )
@@ -282,7 +329,7 @@ else:
         f'<div class="recommendation-ok">'
         f'<strong>✅ ESTADO ÓPTIMO: No se prevé estrés hídrico en los próximos 7 días.</strong><br>'
         f'El balance hídrico proyectado permanece sobre el umbral de estrés ({current_umbral:.1f} mm). '
-        f'Nivel de Agua Útil actual: {current_au:.1f} mm ({current_au/au_corregida*100:.1f}% del AU corregida).'
+        f'Nivel de Agua Útil actual: {current_au:.1f} mm ({pct_au:.1f}% del AU corregida).'
         f'</div>',
         unsafe_allow_html=True
     )
@@ -300,7 +347,7 @@ if crosses_threshold or current_au < current_umbral:
             f"- Agua Útil Proyectada: {cross_au if cross_au else current_au:.1f} mm\n"
             f"- Umbral de Estrés: {current_umbral:.1f} mm\n\n"
             f"💧 **Recomendación Agronómica:**\n"
-            f"- Lámina sugerida: **{lamina_rec:.1f} mm**\n"
+            f"- Lámina bruta sugerida: **{lamina_bruta:.1f} mm** ({lamina_neta:.1f} mm netos, ef. {eficiencia_riego:.0%})\n"
             f"- Tiempo estimado de pivote: **{tiempo_horas:.1f} horas**\n\n"
             f"_Alerta generada automáticamente por Craneando el Riego v1.0._"
         )
@@ -315,7 +362,7 @@ if crosses_threshold or current_au < current_umbral:
                 lote=lote_selected,
                 df_proj=df_proj,
                 eval_date=eval_date,
-                lamina_rec=lamina_rec,
+                lamina_rec=lamina_bruta,
                 tiempo_horas=tiempo_horas
             )
             if success_tg:
@@ -333,7 +380,7 @@ with col1:
         f'<small>Agua Útil Actual</small>'
         f'<h3>{current_au:.1f} mm</h3>'
         f'<p style="color: {"green" if current_au >= current_umbral else "red"}">'
-        f'{current_au/au_corregida*100:.1f}% de AU corregida</p>'
+        f'{pct_au:.1f}% de AU corregida</p>'
         f'</div>',
         unsafe_allow_html=True
     )
@@ -473,7 +520,9 @@ fig.update_layout(
     height=500
 )
 
-fig.update_yaxes(title_text="Lluvia / Riego (mm)", secondary_y=True, range=[100, 0]) # Invertido para que caiga desde arriba
+# Rango invertido (las barras caen desde arriba); el máximo se adapta a la lluvia registrada
+max_barra = max(df_total["lluvia"].max(), df_total["riego"].max(), 40.0)
+fig.update_yaxes(title_text="Lluvia / Riego (mm)", secondary_y=True, range=[max_barra * 2.5, 0])
 fig.update_yaxes(range=[0, techo + 10], secondary_y=False)
 
 st.plotly_chart(fig, use_container_width=True)
@@ -556,7 +605,7 @@ fig_calib.add_trace(
     go.Scatter(
         x=df_past_plot["fecha"],
         y=df_past_plot["au_sensor_mm"],
-        name="AU Medida (Sensor AGSENSE)",
+        name="AU Medida (Sondas de prueba)",
         line=dict(color="#2ca02c", width=2.0, dash="dash"),
         mode="lines+markers"
     )
@@ -644,7 +693,9 @@ with col_right:
     
     # NDVI Kc - Marcado como MOCK / PENDIENTE
     # Simular una curva NDVI aproximada que sigue la forma del Kc pero con algo de ruido y desfase
-    sim_ndvi_kc = df_kc["kc"].values * 0.95 + np.random.normal(0, 0.03, len(df_kc))
+    # (semilla fija para que la curva demo no cambie en cada rerun de Streamlit)
+    rng_ndvi = np.random.default_rng(42)
+    sim_ndvi_kc = df_kc["kc"].values * 0.95 + rng_ndvi.normal(0, 0.03, len(df_kc))
     sim_ndvi_kc = np.clip(sim_ndvi_kc, 0.05, 1.15)
     
     fig_kc.add_trace(go.Scatter(

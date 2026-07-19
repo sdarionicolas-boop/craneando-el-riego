@@ -62,8 +62,8 @@ import os
 class WeatherHistory:
     def __init__(self, excel_path: str = None):
         if excel_path is None:
-            # Ubicar el archivo en la raíz del proyecto para compatibilidad local y cloud (Linux/Windows)
-            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            # El Excel de referencia vive en data/ junto a este módulo
+            base_dir = os.path.dirname(os.path.abspath(__file__))
             self.excel_path = os.path.join(base_dir, "Balance hidrico - Maiz - El Trebol.xlsx")
         else:
             self.excel_path = excel_path
@@ -106,6 +106,127 @@ class WeatherHistory:
         df = pd.DataFrame(records)
         self._cache_data = df
         return df
+
+
+def _etp_estacional(month: int) -> float:
+    """ETo promedio estacional (mm/día) para Entre Ríos según el mes."""
+    return 5.5 if month in [11, 12, 1, 2, 3] else 2.0
+
+
+def get_demo_forecast(df_history: pd.DataFrame, eval_date: datetime.date, days: int = 7) -> list:
+    """
+    Construye el "pronóstico" del modo demo a partir del propio histórico de la campaña
+    (pronóstico perfecto): toma lluvia y ETP de los días posteriores a eval_date en la
+    planilla. Si la campaña termina antes de completar la ventana, rellena con el
+    promedio estacional. Evita mezclar el pronóstico real de hoy (otra estación del año)
+    con fechas simuladas de la campaña.
+    """
+    df_future = df_history[df_history["fecha"] > eval_date].head(days)
+    by_date = {row["fecha"]: row for _, row in df_future.iterrows()}
+
+    forecast = []
+    for i in range(1, days + 1):
+        f_date = eval_date + datetime.timedelta(days=i)
+        if f_date in by_date:
+            row = by_date[f_date]
+            forecast.append({"fecha": f_date, "lluvia": row["lluvia"], "etp": row["etp"]})
+        else:
+            forecast.append({"fecha": f_date, "lluvia": 0.0, "etp": _etp_estacional(f_date.month)})
+    return forecast
+
+
+def get_production_history(siembra_date: datetime.date, lat: float = None, lon: float = None) -> tuple:
+    """
+    Construye la serie climática diaria real desde la siembra hasta ayer para alimentar
+    el motor en modo producción: base Open-Meteo Archive, sobrescrita por las estaciones
+    DGHyOS (Urdinarrain, y Concepción del Uruguay como fallback) en los días que reportan
+    datos sanos. El riego aplicado se inicializa en 0 (la carga de riegos reales queda
+    pendiente de ingesta).
+
+    Retorna una tupla (DataFrame con columnas fecha/lluvia/coef_lluvia/etp/riego, origen_str).
+    """
+    lat = lat if lat is not None else LATITUDE
+    lon = lon if lon is not None else LONGITUDE
+    end_date = datetime.date.today() - datetime.timedelta(days=1)
+    if siembra_date > end_date:
+        return pd.DataFrame(columns=["fecha", "lluvia", "coef_lluvia", "etp", "riego"]), "Sin datos"
+
+    # 1. Base: Open-Meteo Archive para toda la temporada
+    base_data = {}
+    url_meteo = (
+        f"https://archive-api.open-meteo.com/v1/archive?latitude={lat}&longitude={lon}"
+        f"&start_date={siembra_date.strftime('%Y-%m-%d')}&end_date={end_date.strftime('%Y-%m-%d')}"
+        f"&daily=precipitation_sum,et0_fao_evapotranspiration&timezone=America/Argentina/Buenos_Aires"
+    )
+    try:
+        response = requests.get(url_meteo, timeout=10)
+        if response.status_code == 200:
+            daily = response.json().get("daily", {})
+            dates = daily.get("time", [])
+            precip = daily.get("precipitation_sum", [])
+            et0 = daily.get("et0_fao_evapotranspiration", [])
+            for i in range(len(dates)):
+                d_obj = datetime.datetime.strptime(dates[i], "%Y-%m-%d").date()
+                base_data[d_obj] = {
+                    "lluvia": float(precip[i]) if precip[i] is not None else 0.0,
+                    "etp": float(et0[i]) if et0[i] is not None else _etp_estacional(d_obj.month),
+                    "origen": "Open-Meteo"
+                }
+    except Exception as e:
+        print(f"Error cargando Open-Meteo Archive para la temporada: {e}")
+
+    # 2. Sobrescribir con estaciones DGHyOS (validando sanidad estacional de ETo)
+    station_days = 0
+    for station_url, station_name in [
+        ("https://www.hidraulica.gob.ar/ema/ema-urdinarrain/downld08.txt", "Urdinarrain (DGHyOS)"),
+        ("https://www.hidraulica.gob.ar/ema/ema-curuguay/downld08.txt", "Concepción del Uruguay (DGHyOS)"),
+    ]:
+        station_data = fetch_and_parse_dg_hy_os(station_url)
+        if not station_data:
+            continue
+        avg_et = sum(v["et"] for v in station_data.values()) / len(station_data)
+        current_month = datetime.date.today().month
+        min_et, max_et = (1.0, 3.5) if current_month in [4, 5, 6, 7, 8, 9] else (4.0, 9.0)
+        if not (min_et <= avg_et <= max_et):
+            print(f"{station_name}: ETo promedio ({avg_et:.2f} mm/d) fuera de rango estacional. Descartada.")
+            continue
+        for d_obj, vals in station_data.items():
+            if siembra_date <= d_obj <= end_date and base_data.get(d_obj, {}).get("origen") != "DGHyOS":
+                base_data[d_obj] = {"lluvia": vals["rain"], "etp": vals["et"], "origen": "DGHyOS"}
+                station_days += 1
+
+    if not base_data:
+        return pd.DataFrame(columns=["fecha", "lluvia", "coef_lluvia", "etp", "riego"]), "Sin datos"
+
+    # 3. Serie continua desde siembra hasta ayer (huecos -> promedio estacional)
+    records = []
+    seasonal_days = 0
+    curr = siembra_date
+    while curr <= end_date:
+        if curr in base_data:
+            day = base_data[curr]
+        else:
+            day = {"lluvia": 0.0, "etp": _etp_estacional(curr.month), "origen": "Estacional"}
+            seasonal_days += 1
+        records.append({
+            "fecha": curr,
+            "lluvia": day["lluvia"],
+            "coef_lluvia": None,  # sin override: se usan los rangos de lluvia efectiva
+            "etp": day["etp"],
+            "riego": 0.0
+        })
+        curr += datetime.timedelta(days=1)
+
+    df = pd.DataFrame(records)
+    open_meteo_days = len(df) - station_days - seasonal_days
+    parts = []
+    if station_days > 0:
+        parts.append(f"DGHyOS ({station_days}d)")
+    if open_meteo_days > 0:
+        parts.append(f"Open-Meteo Archive ({open_meteo_days}d)")
+    if seasonal_days > 0:
+        parts.append(f"Estimado estacional ({seasonal_days}d)")
+    return df, " + ".join(parts) if parts else "Sin datos"
 
 
 def fetch_and_parse_dg_hy_os(url: str) -> dict:
