@@ -219,84 +219,114 @@ def fetch_and_parse_dg_hy_os(url: str) -> dict:
 
 def get_realtime_weather_last_7_days(lat: float = LATITUDE, lon: float = LONGITUDE) -> tuple:
     """
-    Obtiene la lluvia y ET de los últimos 7 días usando como fuente principal Urdinarrain (DGHyOS),
-    con fallback a Concepción del Uruguay y fallback secundario a NASA POWER (Open-Meteo Archive).
+    Obtiene la lluvia y ET diaria para cada uno de los últimos 7 días.
+    Realiza una búsqueda día por día: si la estación principal (Urdinarrain) no tiene datos
+    para un día específico, intenta completarlo con Concepción del Uruguay, y si también
+    falla, con Open-Meteo Archive o promedios estacionales.
     Retorna una tupla (lista_diccionarios, active_source_str).
     """
-    sources_to_try = [
-        ("https://www.hidraulica.gob.ar/ema/ema-urdinarrain/downld08.txt", "DGHyOS Estación Urdinarrain"),
-        ("https://www.hidraulica.gob.ar/ema/ema-curuguay/downld08.txt", "DGHyOS Estación Concepción del Uruguay (Fallback)")
-    ]
+    urdinarrain_url = "https://www.hidraulica.gob.ar/ema/ema-urdinarrain/downld08.txt"
+    curuguay_url = "https://www.hidraulica.gob.ar/ema/ema-curuguay/downld08.txt"
     
-    parsed_data = None
-    active_source = "Ninguna"
+    print("Descargando reportes para reconciliación día por día...")
+    urdinarrain_data = fetch_and_parse_dg_hy_os(urdinarrain_url)
+    curuguay_data = fetch_and_parse_dg_hy_os(curuguay_url)
     
-    for url, source_name in sources_to_try:
-        print(f"Intentando obtener datos climáticos de: {source_name}...")
-        data = fetch_and_parse_dg_hy_os(url)
-        if data:
-            # Validación de cordura de ET (para evitar fallas de lectura de datos erráticos)
-            # Calculamos el promedio diario de ET. Si es ridículo (ej: < 0.2 mm o > 12.0 mm), descartamos la fuente.
-            avg_et = sum(v['et'] for v in data.values()) / len(data) if data else 0.0
-            if 0.2 <= avg_et <= 12.0:
-                parsed_data = data
-                active_source = source_name
-                break
-            else:
-                print(f"DATOS CLIMÁTICOS RECHAZADOS: {source_name} arrojó promedio de ET inválido ({avg_et:.2f} mm/día). Activando fallback...")
-        else:
-            print(f"FALLBACK ACTIVADO: La estación {source_name} falló al descargar o parsear.")
+    current_month = datetime.date.today().month
+    is_winter = current_month in [4, 5, 6, 7, 8, 9]
+    min_et, max_et = (1.0, 3.5) if is_winter else (4.0, 9.0)
+    
+    # Validar sanidad de Urdinarrain como estación completa
+    if urdinarrain_data:
+        avg_et = sum(v['et'] for v in urdinarrain_data.values()) / len(urdinarrain_data)
+        if not (min_et <= avg_et <= max_et):
+            print(f"Urdinarrain ETo promedio ({avg_et:.2f} mm/d) fuera de rango estacional ({min_et}-{max_et} mm/d). Descartando estación completa.")
+            urdinarrain_data = None
             
-    if parsed_data:
-        # Convertir a lista de diccionarios ordenada
-        result = []
-        for d in sorted(parsed_data.keys()):
-            result.append({
-                "fecha": d,
-                "lluvia": parsed_data[d]["rain"],
-                "etp": parsed_data[d]["et"]
-            })
-        return result, active_source
-        
-    # FALLBACK SECUNDARIO: Open-Meteo Archive
-    print("Iniciando Fallback Secundario (Open-Meteo Archive)...")
+    # Validar sanidad de Concepción como estación completa
+    if curuguay_data:
+        avg_et = sum(v['et'] for v in curuguay_data.values()) / len(curuguay_data)
+        if not (min_et <= avg_et <= max_et):
+            print(f"Concepción ETo promedio ({avg_et:.2f} mm/d) fuera de rango estacional ({min_et}-{max_et} mm/d). Descartando estación completa.")
+            curuguay_data = None
+
+    # 2. Descargar datos históricos de Open-Meteo para rellenar huecos parciales
     today = datetime.date.today()
     start_date = today - datetime.timedelta(days=7)
     end_date = today - datetime.timedelta(days=1)
     
+    archive_data = {}
     url_meteo = f"https://archive-api.open-meteo.com/v1/archive?latitude={lat}&longitude={lon}&start_date={start_date.strftime('%Y-%m-%d')}&end_date={end_date.strftime('%Y-%m-%d')}&daily=precipitation_sum,et0_fao_evapotranspiration&timezone=America/Argentina/Buenos_Aires"
     
     try:
         response = requests.get(url_meteo, timeout=5)
         if response.status_code == 200:
-            data = response.json()
-            daily = data.get("daily", {})
+            api_data = response.json()
+            daily = api_data.get("daily", {})
             dates = daily.get("time", [])
             precip = daily.get("precipitation_sum", [])
             et0 = daily.get("et0_fao_evapotranspiration", [])
-            
-            result = []
             for i in range(len(dates)):
-                f_date = datetime.datetime.strptime(dates[i], "%Y-%m-%d").date()
-                result.append({
-                    "fecha": f_date,
-                    "lluvia": float(precip[i]) if precip[i] is not None else 0.0,
+                d_obj = datetime.datetime.strptime(dates[i], "%Y-%m-%d").date()
+                archive_data[d_obj] = {
+                    "rain": float(precip[i]) if precip[i] is not None else 0.0,
                     "etp": float(et0[i]) if et0[i] is not None else 2.5
-                })
-            return result, "Open-Meteo Historical Archive (Fallback Secundario)"
+                }
     except Exception as e:
-        print(f"Error consultando Open-Meteo Archive: {e}")
-        
-    # Último Fallback: Generación estática según temporada
-    print("Último Fallback: Generando datos simulados basados en promedios históricos...")
+        print(f"Error cargando fallback Open-Meteo para días faltantes: {e}")
+
+    # 3. Construir la serie de 7 días rellenando individualmente
     result = []
-    is_summer = today.month in [11, 12, 1, 2, 3]
-    default_et = 5.5 if is_summer else 2.0
+    urdinarrain_days = 0
+    curuguay_days = 0
+    archive_days = 0
+    seasonal_days = 0
+    
     for i in range(7, 0, -1):
-        f_date = today - datetime.timedelta(days=i)
+        target_date = today - datetime.timedelta(days=i)
+        
+        # A. Intentar Urdinarrain
+        if urdinarrain_data and target_date in urdinarrain_data:
+            day_rain = urdinarrain_data[target_date]["rain"]
+            day_et = urdinarrain_data[target_date]["et"]
+            urdinarrain_days += 1
+            source_tag = "Urdinarrain (DGHyOS)"
+        # B. Intentar Concepción del Uruguay (Fallback Primario)
+        elif curuguay_data and target_date in curuguay_data:
+            day_rain = curuguay_data[target_date]["rain"]
+            day_et = curuguay_data[target_date]["et"]
+            curuguay_days += 1
+            source_tag = "Concepción del Uruguay (DGHyOS)"
+        # C. Intentar Open-Meteo (Fallback Secundario)
+        elif target_date in archive_data:
+            day_rain = archive_data[target_date]["rain"]
+            day_et = archive_data[target_date]["etp"]
+            archive_days += 1
+            source_tag = "Open-Meteo (Satélite)"
+        # D. Promedio estacional último recurso
+        else:
+            day_rain = 0.0
+            day_et = 5.5 if today.month in [11, 12, 1, 2, 3] else 2.0
+            seasonal_days += 1
+            source_tag = "Estimado (Promedio Estacional)"
+            
         result.append({
-            "fecha": f_date,
-            "lluvia": 0.0,
-            "etp": default_et
+            "fecha": target_date,
+            "lluvia": day_rain,
+            "etp": day_et,
+            "origen": source_tag
         })
-    return result, "Promedios Históricos Estacionales (Último Fallback)"
+        
+    # Construir resumen del origen de datos para la UI
+    summary_sources = []
+    if urdinarrain_days > 0:
+        summary_sources.append(f"Urdinarrain ({urdinarrain_days}d)")
+    if curuguay_days > 0:
+        summary_sources.append(f"Concepción ({curuguay_days}d)")
+    if archive_days > 0:
+        summary_sources.append(f"Open-Meteo ({archive_days}d)")
+    if seasonal_days > 0:
+        summary_sources.append(f"Estimado ({seasonal_days}d)")
+        
+    active_source = " + ".join(summary_sources) if summary_sources else "Sin datos"
+    return result, active_source

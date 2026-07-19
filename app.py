@@ -105,7 +105,7 @@ st.sidebar.markdown("---")
 st.sidebar.subheader("🎯 Criterio de Riego")
 cc_target_pct = st.sidebar.slider("% CC Objetivo a cubrir", 70, 100, 100, help="Estrategia ofensiva (100%) vs conservadora (deja margen para lluvias)")
 infiltracion_limit = st.sidebar.number_input("Infiltración máx. suelo (mm/riego)", 5.0, 50.0, soil_profile.infiltracion_max, step=5.0)
-st.sidebar.caption("⚠️ *Infiltración de 15.0 mm: Valor estimado por bibliografía para suelos Vertisoles arcillosos de San Martín (sin medición en campo).*")
+st.sidebar.caption("⚠️ *Infiltración de 5.0 mm: Valor estimado por bibliografía para suelos Vertisoles arcillosos de San Martín (sin medición en campo).*")
 caudal_pivote = st.sidebar.number_input("Caudal Pivote (mm/hora)", 0.5, 5.0, soil_profile.caudal_pivote, step=0.1)
 
 # Simulación de la fecha actual
@@ -523,8 +523,8 @@ with col_rt_table:
     # Convertir a DataFrame para visualización
     df_rt = pd.DataFrame(realtime_data)
     df_rt["Fecha"] = df_rt["fecha"].apply(lambda d: d.strftime('%d/%m/%Y'))
-    df_rt = df_rt.rename(columns={"lluvia": "Lluvia (mm)", "etp": "ETo (mm)"})
-    st.dataframe(df_rt[["Fecha", "Lluvia (mm)", "ETo (mm)"]], hide_index=True, use_container_width=True)
+    df_rt = df_rt.rename(columns={"lluvia": "Lluvia (mm)", "etp": "ETo (mm)", "origen": "Origen de Datos"})
+    st.dataframe(df_rt[["Fecha", "Lluvia (mm)", "ETo (mm)", "Origen de Datos"]], hide_index=True, use_container_width=True)
 
 st.markdown("---")
 
